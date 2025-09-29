@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>E4101 Dashboard</title>
+<!-- MQTT over WebSocket client -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root { --ok:#16a34a; --bad:#e11d48; --ink:#111827; --muted:#6b7280; --bg:#f6f7fb; --pri:#4f46e5; }
+  *{box-sizing:border-box}
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; background: var(--bg); color: var(--ink); }
+  h1 { margin: 0 0 16px; }
+  .card { background:#fff; border-radius:16px; padding:16px 18px; box-shadow:0 6px 20px rgba(0,0,0,.07); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  .grow { flex:1 1 auto; }
+  .small { font-size:13px; color:var(--muted) }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  th, td { padding:10px 12px; border-bottom:1px solid #eee; text-align:left; }
+  th { background:#fafbff; font-weight:600; }
+  code { background:#f3f4f6; padding:2px 6px; border-radius:6px; }
+  .pill { display:inline-block; padding:4px 10px; border-radius:999px; font-size:13px; font-weight:600; }
+  .ok  { background:#dcfce7; color:#166534; }
+  .bad { background:#ffe4e6; color:#9f1239; }
+  .led { width:14px; height:14px; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:8px; box-shadow:0 0 8px rgba(0,0,0,0.25) inset; }
+  .green { background:#16c60c; }
+  .red   { background:#e81123; }
+  .btn { padding:10px 14px; border:0; border-radius:10px; cursor:pointer; font-weight:600; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .primary { background:var(--pri); color:#fff; }
+  .ghost { background:#eef2ff; color:#3730a3; }
+  .danger { background:#fee2e2; color:#991b1b; }
+</style>
+</head>
+<body>
+  <h1>E4101 Dashboard</h1>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="row">
+      <div class="grow">
+        <div class="small">Broker</div>
+        <div id="broker">wss://…</div>
+      </div>
+      <div>
+        <div class="small">Kết nối</div>
+        <span id="conn" class="pill bad">DISCONNECTED</span>
+      </div>
+      <div>
+        <button id="btnReconnect" class="btn ghost">Reconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Topic</th>
+          <th>Giá trị / Trạng thái</th>
+          <th>Điều khiển</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>E4101/Trạng thái kết nối</code></td>
+          <td><span id="status" class="pill bad">offline</span></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><code>E4101/Nhiệt độ</code></td>
+          <td><span id="temp">—</span> °C</td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><code>E4101/Tình trạng</code></td>
+          <td><span id="fire" class="pill ok">CLEAR</span></td>
+          <td>
+            <button id="btnClear" class="btn danger">Clear Alarm</button>
+            <button id="btnMute" class="btn ghost">Mute 60s</button>
+          </td>
+        </tr>
+        <tr>
+          <td><code>E4101/LED</code></td>
+          <td>
+            <span id="ledDot" class="led red"></span>
+            <span id="ledText">OFF</span>
+          </td>
+          <td>
+            <button id="btnLedOn"  class="btn primary">LED ON</button>
+            <button id="btnLedOff" class="btn ghost">LED OFF (SAFE)</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="small" style="margin-top:8px;">Phản hồi tại <code>E4101/ack</code> (xem console).</div>
+  </div>
+
+<script>
+  // ===== CẤU HÌNH HIVE MQ CLOUD CỦA BẠN =====
+  const HOST = "c15d2a8461e94901b23bf6194891a553.s1.eu.hivemq.cloud";
+  const PORT = 8884; // WSS
+  const USER = "Thanh";
+  const PASS = "123456789Aa";
+
+  // ===== TOPIC =====
+  const TOPIC_TEMP       = "E4101/Nhiệt độ";
+  const TOPIC_FIRE       = "E4101/Tình trạng";
+  const TOPIC_STATUS     = "E4101/Trạng thái kết nối";
+  const TOPIC_ACK        = "E4101/ack";
+  const TOPIC_LED_STATE  = "E4101/LED";
+  const TOPIC_CMD_LED    = "E4101/cmd/led";
+  const TOPIC_CMD_ALARM  = "E4101/cmd/alarm";
+  const TOPIC_CMD_BUZZER = "E4101/cmd/buzzer";
+
+  // ===== UI helpers =====
+  const $ = id => document.getElementById(id);
+  $('broker').textContent = `wss://${HOST}:${PORT}/mqtt`;
+
+  // ===== MQTT client =====
+  let client;
+
+  function connect() {
+    client = mqtt.connect(`wss://${HOST}:${PORT}/mqtt`, {
+      username: USER,
+      password: PASS,
+      clean: true,
+      reconnectPeriod: 2000,  // auto reconnect
+      connectTimeout: 8000,
+    });
+
+    client.on('connect', () => {
+      $('conn').textContent = "CONNECTED";
+      $('conn').className = "pill ok";
+      client.subscribe([TOPIC_TEMP, TOPIC_FIRE, TOPIC_STATUS, TOPIC_LED_STATE, TOPIC_ACK], { qos: 1 });
+    });
+
+    client.on('reconnect', () => {
+      $('conn').textContent = "RECONNECTING…";
+      $('conn').className = "pill bad";
+    });
+
+    client.on('close', () => {
+      $('conn').textContent = "DISCONNECTED";
+      $('conn').className = "pill bad";
+    });
+
+    client.on('error', (e) => {
+      console.error("MQTT error:", e);
+    });
+
+    client.on('message', (topic, payload) => {
+      const msg = payload.toString();
+      console.log(topic, msg);
+
+      if (topic === TOPIC_STATUS) {
+        const online = /online/i.test(msg);
+        $('status').textContent = online ? "online" : "offline";
+        $('status').className = online ? "pill ok" : "pill bad";
+      }
+      else if (topic === TOPIC_TEMP) {
+        $('temp').textContent = msg;
+      }
+      else if (topic === TOPIC_FIRE) {
+        const fire = /(CHÁY|FIRE)/i.test(msg);
+        $('fire').textContent = fire ? "CHÁY" : "CLEAR";
+        $('fire').className = fire ? "pill bad" : "pill ok";
+      }
+      else if (topic === TOPIC_LED_STATE) {
+        const on = msg.trim().toUpperCase() === "ON";
+        $('ledText').textContent = on ? "ON" : "OFF";
+        $('ledDot').className = "led " + (on ? "green" : "red");
+      }
+      else if (topic === TOPIC_ACK) {
+        console.log("ACK:", msg);
+      }
+    });
+  }
+
+  // ===== Buttons =====
+  $('btnLedOn').onclick  = () => client.publish(TOPIC_CMD_LED, "on",  { qos:1 });
+  // OFF = SAFE (về an toàn) theo code trên ESP32
+  $('btnLedOff').onclick = () => client.publish(TOPIC_CMD_LED, "off", { qos:1 });
+
+  // Clear Alarm (SAFE)
+  $('btnClear').onclick  = () => client.publish(TOPIC_CMD_ALARM, "clear", { qos:1 });
+
+  // Mute còi 60s (không clear)
+  $('btnMute').onclick   = () => client.publish(TOPIC_CMD_BUZZER, "silence:60", { qos:1 });
+
+  // Reconnect
+  $('btnReconnect').onclick = () => { try { client && client.end(true); } catch(e){}; connect(); };
+
+  // Start
+  connect();
+</script>
+</body>
+</html>
